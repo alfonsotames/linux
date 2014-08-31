@@ -114,6 +114,8 @@ typedef struct _cam_data {
 	struct semaphore busy_lock;
 
 	int open_count;
+	struct delayed_work power_down_work;
+	int power_on;
 
 	/* params lock for this camera */
 	struct semaphore param_lock;
@@ -200,6 +202,9 @@ typedef struct _cam_data {
 	/* misc status flag */
 	bool overlay_on;
 	bool capture_on;
+	bool ipu_enable_csi_called;
+	struct ipu_chan *ipu_chan;
+	struct ipu_chan *ipu_chan_rot;
 	int overlay_pid;
 	int capture_pid;
 	bool low_power;
@@ -251,10 +256,31 @@ struct sensor_data {
 	u32 mclk;
 	u8 mclk_source;
 	struct clk *sensor_clk;
+	int ipu_id;
 	int csi;
 
 	void (*io_init)(void);
 };
 
 void set_mclk_rate(uint32_t *p_mclk_freq, uint32_t csi);
+void mxc_camera_common_lock(void);
+void mxc_camera_common_unlock(void);
+
+static inline int cam_ipu_enable_csi(cam_data *cam)
+{
+	int ret = ipu_enable_csi(cam->ipu, cam->csi);
+	if (!ret)
+		cam->ipu_enable_csi_called = 1;
+	return ret;
+}
+
+static inline int cam_ipu_disable_csi(cam_data *cam)
+{
+	if (!cam->ipu_enable_csi_called)
+		return 0;
+	cam->ipu_enable_csi_called = 0;
+	return ipu_disable_csi(cam->ipu, cam->csi);
+}
+
+
 #endif				/* __MXC_V4L2_CAPTURE_H__ */

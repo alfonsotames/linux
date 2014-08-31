@@ -34,6 +34,7 @@
 #include <linux/fb.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/mxcfb.h>
 #include <linux/of_device.h>
 #include <media/v4l2-chip-ident.h>
@@ -1074,6 +1075,16 @@ static int mxc_v4l2_g_ctrl(cam_data *cam, struct v4l2_control *c)
 	return status;
 }
 
+static int mxc_v4l2_send_command(cam_data *cam,
+		struct v4l2_send_command_control *c) {
+	int ret =0;
+
+	if (vidioc_int_send_command(cam->sensor, c)) {
+		ret = -EINVAL;
+	}
+	return ret;
+}
+
 /*!
  * V4L2 - set_control function
  *          V4L2_CID_PRIVATE_BASE is the extention for IPU preprocessing.
@@ -1236,6 +1247,19 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 		ipu_csi_flash_strobe(true);
 #endif
 		break;
+
+	case V4L2_CID_AUTO_FOCUS_START: {
+		ret = vidioc_int_s_ctrl(cam->sensor, c);
+		break;
+	}
+
+	case V4L2_CID_AUTO_FOCUS_STOP: {
+		if (vidioc_int_s_ctrl(cam->sensor, c)) {
+			ret = -EINVAL;
+		}
+		break;
+	}
+
 	case V4L2_CID_MXC_SWITCH_CAM:
 		if (cam->sensor == cam->all_sensors[c->value])
 			break;
@@ -1564,6 +1588,38 @@ static int mxc_v4l_dqueue(cam_data *cam, struct v4l2_buffer *buf)
 	return retval;
 }
 
+static void power_down_callback(struct work_struct *work)
+{
+	cam_data *cam = container_of(work, struct _cam_data, power_down_work.work);
+
+	down(&cam->busy_lock);
+	if (!cam->open_count) {
+		pr_err("%s\n", __func__);
+		vidioc_int_s_power(cam->sensor, 0);
+		cam->power_on = 0;
+	}
+	up(&cam->busy_lock);
+}
+
+/* cam->busy_lock is held */
+void power_up_camera(cam_data *cam)
+{
+	if (cam->power_on) {
+		cancel_delayed_work(&cam->power_down_work);
+		return;
+	}
+	vidioc_int_s_power(cam->sensor, 1);
+	vidioc_int_init(cam->sensor);
+	vidioc_int_dev_init(cam->sensor);
+	cam->power_on = 1;
+}
+
+
+void power_off_camera(cam_data *cam)
+{
+	schedule_delayed_work(&cam->power_down_work, (HZ * 2));
+}
+
 /*!
  * V4L interface - open function
  *
@@ -1706,9 +1762,7 @@ static int mxc_v4l_open(struct file *file)
 					cam_fmt.fmt.pix.pixelformat,
 					csi_param);
 		clk_prepare_enable(sensor->sensor_clk);
-		vidioc_int_s_power(cam->sensor, 1);
-		vidioc_int_init(cam->sensor);
-		vidioc_int_dev_init(cam->sensor);
+		power_up_camera(cam);
 	}
 
 	file->private_data = dev;
@@ -1763,7 +1817,6 @@ static int mxc_v4l_close(struct file *file)
 	}
 
 	if (--cam->open_count == 0) {
-		vidioc_int_s_power(cam->sensor, 0);
 		clk_disable_unprepare(sensor->sensor_clk);
 		wait_event_interruptible(cam->power_queue,
 					 cam->low_power == false);
@@ -1788,6 +1841,7 @@ static int mxc_v4l_close(struct file *file)
 		wake_up_interruptible(&cam->enc_queue);
 		mxc_free_frames(cam);
 		cam->enc_counter++;
+		power_off_camera(cam);
 	}
 
 	up(&cam->busy_lock);
@@ -2245,6 +2299,10 @@ static long mxc_v4l_do_ioctl(struct file *file,
 	case VIDIOC_ENUMSTD: {
 		struct v4l2_standard *e = arg;
 		pr_debug("   case VIDIOC_ENUMSTD\n");
+		if (e->index > 0) {
+			retval = -EINVAL;
+			break;
+		}
 		*e = cam->standard;
 		break;
 	}
@@ -2387,6 +2445,12 @@ static long mxc_v4l_do_ioctl(struct file *file,
 		}
 		break;
 	}
+
+	case VIDIOC_SEND_COMMAND: {
+		retval = mxc_v4l2_send_command(cam, arg);
+		break;
+	}
+
 	case VIDIOC_TRY_FMT:
 	case VIDIOC_QUERYCTRL:
 	case VIDIOC_G_TUNER:
@@ -2611,6 +2675,7 @@ static int init_camera_struct(cam_data *cam, struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	int ipu_id, csi_id, mclk_source;
 	int ret = 0;
+	static int camera_id;
 
 	pr_debug("In MVC: init_camera_struct\n");
 
@@ -2654,6 +2719,7 @@ static int init_camera_struct(cam_data *cam, struct platform_device *pdev)
 
 	init_MUTEX(&cam->param_lock);
 	init_MUTEX(&cam->busy_lock);
+	INIT_DELAYED_WORK(&cam->power_down_work, power_down_callback);
 
 	cam->video_dev = video_device_alloc();
 	if (cam->video_dev == NULL)
@@ -2715,7 +2781,7 @@ static int init_camera_struct(cam_data *cam, struct platform_device *pdev)
 
 	cam->self = kmalloc(sizeof(struct v4l2_int_device), GFP_KERNEL);
 	cam->self->module = THIS_MODULE;
-	sprintf(cam->self->name, "mxc_v4l2_cap%d", cam->csi);
+	sprintf(cam->self->name, "mxc_v4l2_cap%d", camera_id++);
 	cam->self->type = v4l2_int_type_master;
 	cam->self->u.master = &mxc_v4l2_master;
 
@@ -2917,7 +2983,8 @@ static int mxc_v4l2_resume(struct platform_device *pdev)
 	wake_up_interruptible(&cam->power_queue);
 
 	if (cam->sensor && cam->open_count) {
-		vidioc_int_s_power(cam->sensor, 1);
+		if ((cam->overlay_on == true) || (cam->capture_on == true))
+			vidioc_int_s_power(cam->sensor, 1);
 
 		if (!cam->mclk_on[cam->mclk_source]) {
 			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
@@ -2973,6 +3040,10 @@ static int mxc_v4l2_master_attach(struct v4l2_int_device *slave)
 		return -1;
 	}
 
+	if (sdata->ipu_id != cam->ipu_id) {
+		pr_debug("%s: ipu doesn't match\n", __func__);
+		return -1;
+	}
 	if (sdata->csi != cam->csi) {
 		pr_debug("%s: csi doesn't match\n", __func__);
 		return -1;
@@ -2989,6 +3060,7 @@ static int mxc_v4l2_master_attach(struct v4l2_int_device *slave)
 	}
 
 	for (i = 0; i < cam->sensor_index; i++) {
+		pr_err("%s: %x\n", __func__, i);
 		vidioc_int_dev_exit(cam->all_sensors[i]);
 		vidioc_int_s_power(cam->all_sensors[i], 0);
 	}
@@ -3059,6 +3131,20 @@ static void mxc_v4l2_master_detach(struct v4l2_int_device *slave)
 	cam->sensor_index--;
 	vidioc_int_dev_exit(slave);
 }
+
+DEFINE_MUTEX(camera_common_mutex);
+
+void mxc_camera_common_lock(void)
+{
+	mutex_lock(&camera_common_mutex);
+}
+EXPORT_SYMBOL(mxc_camera_common_lock);
+
+void mxc_camera_common_unlock(void)
+{
+	mutex_unlock(&camera_common_mutex);
+}
+EXPORT_SYMBOL(mxc_camera_common_unlock);
 
 /*!
  * Entry point for the V4L2
