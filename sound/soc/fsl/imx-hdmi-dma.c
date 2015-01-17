@@ -79,7 +79,6 @@ struct hdmi_dma_priv {
 /* max 8 channels supported; channels are interleaved */
 static u8 g_packet_head_table[48 * 8];
 
-
 /* channel remapping for hdmi_dma_copy_xxxx() */
 static u8 g_channel_remap_table[24];
 
@@ -99,7 +98,6 @@ static const u8 channel_maps_cea_alsa[5][8] = {
 	{ 0, 1, 5, 4, 2, 3, 6, 7 },	/* 6CH: CEA to ALSA5.1 */
 	{ 0, 1, 5, 4, 6, 7, 2, 3 }	/* 8CH: CEA to ALSA7.1 */
 };
-
 
 union hdmi_audio_header_t iec_header;
 EXPORT_SYMBOL(iec_header);
@@ -233,7 +231,7 @@ static void hdmi_mask(int mask)
 	hdmi_writeb(regval, HDMI_AHB_DMA_MASK);
 }
 
-int odd_ones(unsigned a)
+static inline int odd_ones(unsigned a)
 {
 	a ^= a >> 16;
 	a ^= a >> 8;
@@ -251,27 +249,29 @@ static u32 hdmi_dma_add_frame_info(struct hdmi_dma_priv *priv,
 	union hdmi_audio_dma_data_t subframe;
 
 	subframe.U = 0;
-	iec_header.B.channel = subframe_idx;
-
-	/* fill b (start-of-block) */
-	subframe.B.b = (priv->frame_idx == 0) ? 1 : 0;
 
 	/* fill c (channel status) */
-	if (priv->frame_idx < 42)
-		subframe.B.c = (iec_header.U >> priv->frame_idx) & 0x1;
-	else
-		subframe.B.c = 0;
-
-	subframe.B.p = odd_ones(pcm_data);
-	subframe.B.p ^= subframe.B.c;
-	subframe.B.p ^= subframe.B.u;
-	subframe.B.p ^= subframe.B.v;
+	if (priv->frame_idx < 42) {
+		iec_header.B.channel = 
+			(iec_header.B.linear_pcm == 0) ? subframe_idx : 0;
+		subframe.B.c = iec_header.U >> priv->frame_idx;
+	}
+	
+	/* fill v (validity) */
+	subframe.B.v = iec_header.B.linear_pcm;
 
 	/* fill data */
 	if (priv->sample_bits == 16)
 		subframe.B.data = pcm_data << 8;
 	else
 		subframe.B.data = pcm_data;
+
+	/* fill p (parity) Note: Do not include b ! */
+	subframe.B.p = odd_ones(subframe.U);
+
+	/* fill b (start-of-block) */
+	if (priv->frame_idx == 0)
+		subframe.B.b = 1;
 
 	return subframe.U;
 }
@@ -304,46 +304,21 @@ static void init_table(int channels)
 	}
 }
 
-/*
- * FIXME: Disable NEON Optimization in hdmi, or it will cause crash of
- * pulseaudio in the userspace. There is no issue for the Optimization
- * implemenation, if only use "VPUSH, VPOP" in the function, the pulseaudio
- * will crash also. So for my assumption, we can't use the NEON in the
- * interrupt.(tasklet is implemented by softirq.)
- * Disable SMP, preempt, change the dma buffer to nocached, add protection of
- * Dn register and fpscr, all these operation have no effect to the result.
- */
-#define HDMI_DMA_NO_NEON
-
-#ifdef HDMI_DMA_NO_NEON
 /* Optimization for IEC head */
 static void hdmi_dma_copy_16_c_lut(u16 *src, u32 *dst, int samples,
 				u8 *lookup_table)
 {
-
 	u32 sample, head;
 	int i = 0;
-
 
 	while (samples--) {
 		/* get source sample */
 		sample = src[g_channel_remap_table[i]];
 
-		/* xor every bit */
-		p = sample ^ (sample >> 8);
-		p ^= (p >> 4);
-		p ^= (p >> 2);
-		p ^= (p >> 1);
-		p &= 1;	/* only want last bit */
-		p <<= 3; /* bit p */
+		/* get packet header and p-bit */
+		head = *lookup_table++ ^ (odd_ones(sample) << 3);
 
-		/* get packet header */
-		head = *lookup_table++;
-
-		/* fix head */
-		head ^= p;
-
-		/* store */
+		/* store sample and header */
 		*dst++ = (head << 24) | (sample << 8);
 
 		if (++i == 24) {
@@ -355,15 +330,12 @@ static void hdmi_dma_copy_16_c_lut(u16 *src, u32 *dst, int samples,
 
 static void hdmi_dma_copy_16_c_fast(u16 *src, u32 *dst, int samples)
 {
-
 	u32 sample;
 	int i = 0;
-
 
 	while (samples--) {
 		/* get source sample */
 		sample = src[g_channel_remap_table[i]];
-
 
 		/* store sample and p-bit */
 		*dst++ = (odd_ones(sample) << (3+24)) | (sample << 8);
@@ -418,11 +390,23 @@ static void hdmi_dma_copy_24_c_fast(u32 *src, u32 *dst, int samples)
 }
 
 static void hdmi_mmap_copy(u8 *src, int samplesize, u32 *dst, int framecnt, int channelcnt)
-
 {
 	/* split input frames into 192-frame each */
 	int count_in_192 = (framecnt + 191) / 192;
 	int i;
+
+	typedef void (*fn_copy_lut)(u8 *src, u32 *dst, int samples, u8 *lookup_table);
+	typedef void (*fn_copy_fast)(u8 *src, u32 *dst, int samples);
+	fn_copy_lut copy_lut;
+	fn_copy_fast copy_fast;
+
+	if (samplesize == 4) {
+		copy_lut = (fn_copy_lut)hdmi_dma_copy_24_c_lut;
+		copy_fast = (fn_copy_fast)hdmi_dma_copy_24_c_fast;
+	} else {
+		copy_lut = (fn_copy_lut)hdmi_dma_copy_16_c_lut;
+		copy_fast = (fn_copy_fast)hdmi_dma_copy_16_c_fast;
+	}
 
 	for (i = 0; i < count_in_192; i++) {
 		int count, samples;
@@ -430,62 +414,23 @@ static void hdmi_mmap_copy(u8 *src, int samplesize, u32 *dst, int framecnt, int 
 		/* handles frame index [0, 48) */
 		count = (framecnt < 48) ? framecnt : 48;
 		samples = count * channelcnt;
-		hdmi_dma_copy_16_c_lut(src, dst, samples, g_packet_head_table);
+		copy_lut(src, dst, samples, g_packet_head_table);
 		framecnt -= count;
 		if (framecnt == 0)
 			break;
 
-		src  += samples;
+		src  += samples * samplesize;
 		dst += samples;
 
 		/* handles frame index [48, 192) */
 		count = (framecnt < 192 - 48) ? framecnt : 192 - 48;
 		samples = count * channelcnt;
-		hdmi_dma_copy_16_c_fast(src, dst, samples);
+		copy_fast(src, dst, samples);
 		framecnt -= count;
-		src  += samples;
+		src  += samples * samplesize;
 		dst += samples;
 	}
 }
-#else
-/* NEON optimization for IEC head*/
-
-/**
- * Convert pcm samples to iec samples suitable for HDMI transfer.
- * PCM sample is 16 bits length.
- * Frame index always starts from 0.
- * Channel count can be 1, 2, 4, 6, or 8
- * Sample count (frame_count * channel_count) is multipliable by 8.
- */
-static void hdmi_dma_copy_16(u16 *src, u32 *dst, int framecount, int channelcount)
-{
-	/* split input frames into 192-frame each */
-	int i, count_in_192 = (framecount + 191) / 192;
-
-	for (i = 0; i < count_in_192; i++) {
-		int count, samples;
-
-		/* handles frame index [0, 48) */
-		count = (framecount < 48) ? framecount : 48;
-		samples = count * channelcount;
-		hdmi_dma_copy_16_neon_lut(src, dst, samples, g_packet_head_table);
-		framecount -= count;
-		if (framecount == 0)
-			break;
-
-		src += samples;
-		dst += samples;
-
-		/* handles frame index [48, 192) */
-		count = (framecount < 192 - 48) ? framecount : (192 - 48);
-		samples = count * channelcount;
-		hdmi_dma_copy_16_neon_fast(src, dst, samples);
-		framecount -= count;
-		src += samples;
-		dst += samples;
-	}
-}
-#endif
 
 static void hdmi_dma_mmap_copy(struct snd_pcm_substream *substream,
 				int offset, int count)
@@ -495,7 +440,6 @@ static void hdmi_dma_mmap_copy(struct snd_pcm_substream *substream,
 	struct hdmi_dma_priv *priv = runtime->private_data;
 	struct device *dev = rtd->platform->dev;
 	u32 framecount, *dst;
-	u16 *src16;
 
 	framecount = count / (priv->sample_align * priv->channels);
 
@@ -504,9 +448,10 @@ static void hdmi_dma_mmap_copy(struct snd_pcm_substream *substream,
 
 	switch (priv->format) {
 	case SNDRV_PCM_FORMAT_S16_LE:
+	case SNDRV_PCM_FORMAT_S24_LE:
 		/* dma_buffer is the mmapped buffer we are copying pcm from. */
-		src16 = (u16 *)(runtime->dma_area + offset);
-		hdmi_dma_copy_16(src16, dst, framecount, priv->channels);
+		hdmi_mmap_copy(runtime->dma_area + offset,
+			       priv->sample_align, dst, framecount, priv->channels);
 		break;
 	default:
 		dev_err(dev, "unsupported sample format %s\n",
@@ -525,19 +470,17 @@ static void hdmi_dma_data_copy(struct snd_pcm_substream *substream,
 		return;
 
 	appl_bytes = frames_to_bytes(runtime, runtime->status->hw_ptr);
-	if (type == 'p')
-		appl_bytes += 2 * priv->period_bytes;
-	offset = appl_bytes % priv->buffer_bytes;
 
 	switch (type) {
 	case 'p':
+		offset = (appl_bytes + 2 * priv->period_bytes) % priv->buffer_bytes;
 		count = priv->period_bytes;
 		space_to_end = priv->period_bytes;
 		break;
 	case 'b':
+		offset = appl_bytes % priv->buffer_bytes;
 		count = priv->buffer_bytes;
 		space_to_end = priv->buffer_bytes - offset;
-
 		break;
 	default:
 		return;
@@ -933,6 +876,15 @@ static void hdmi_dma_trigger_init(struct snd_pcm_substream *substream,
 				struct hdmi_dma_priv *priv)
 {
 	unsigned long status;
+	bool hbr;
+
+	/*
+	 * Set HBR mode (>192kHz IEC-61937 HD audio bitstreaming).
+	 * This is done this late because userspace may alter the AESx
+	 * parameters until the stream is finally prepared.
+	 */
+	hbr = (iec_header.B.linear_pcm != 0 && priv->channels == 8);
+	hdmi_audio_writeb(AHB_DMA_CONF0, HBR, !!hbr);
 
 	priv->offset = 0;
 	priv->frame_idx = 0;
@@ -1260,3 +1212,4 @@ module_platform_driver(imx_hdmi_dma_driver);
 MODULE_AUTHOR("Freescale Semiconductor, Inc.");
 MODULE_DESCRIPTION("i.MX HDMI audio DMA");
 MODULE_LICENSE("GPL");
+
