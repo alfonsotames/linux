@@ -146,10 +146,10 @@ static struct cea_channel_speaker_allocation channel_allocations[] = {
 	{ .ca_index = 0x09, .speakers = {   0,    0,  RR,  RL,   0,  LFE,  FR,  FL },},
 	{ .ca_index = 0x0a, .speakers = {   0,    0,  RR,  RL,  FC,    0,  FR,  FL },},
 					 /* surround51 */
-	{ .ca_index = 0x0b, .speakers = {   0,    0,  RR,  RL,  FC,  LFE,  FR,  FL },},
-	{ .ca_index = 0x0c, .speakers = {   0,   RC,  RR,  RL,   0,    0,  FR,  FL },},
-	{ .ca_index = 0x0d, .speakers = {   0,   RC,  RR,  RL,   0,  LFE,  FR,  FL },},
-	{ .ca_index = 0x0e, .speakers = {   0,   RC,  RR,  RL,  FC,    0,  FR,  FL },},
+	{ .ca_index = 0x0b, .speakers = {   0,    0,  LFE,  FC,  RL,  RR,  FR,  FL },},
+	{ .ca_index = 0x0c, .speakers = {   0,   RC,    0,   0,  RL,  RR,  FR,  FL },},
+	{ .ca_index = 0x0d, .speakers = {   0,   RC,  LFE,   0,  RL,  RR,  FR,  FL },},
+	{ .ca_index = 0x0e, .speakers = {   0,   RC,    0,  FC,  RL,  RR,  FR,  FL },},
 					 /* 6.1 */
 	{ .ca_index = 0x0f, .speakers = {   0,   RC,  RR,  RL,  FC,  LFE,  FR,  FL },},
 	{ .ca_index = 0x10, .speakers = { RRC,  RLC,  RR,  RL,   0,    0,  FR,  FL },},
