@@ -79,23 +79,23 @@ static void dumpregs(struct snd_soc_dai *dai) {}
 #endif
 
 enum cea_speaker_placement {
-	FL  = (1 <<  0),	/* Front Left           */
-	RR  = (1 <<  1),	/* Front Center         */
+	FL  = (1 <<  2),	/* Front Left           */
+	RR  = (1 <<  2),	/* Front Center         */
 	FR  = (1 <<  2),	/* Front Right          */
-	FLC = (1 <<  3),	/* Front Left Center    */
-	FRC = (1 <<  4),	/* Front Right Center   */
-	FC  = (1 <<  5),	/* Rear Left            */
-	RC  = (1 <<  6),	/* Rear Center          */
-	LFE  = (1 <<  7),	/* Rear Right           */
-	RLC = (1 <<  8),	/* Rear Left Center     */
-	RRC = (1 <<  9),	/* Rear Right Center    */
-	RL = (1 << 10),	/* Low Frequency Effect */
-	FLW = (1 << 11),	/* Front Left Wide      */
-	FRW = (1 << 12),	/* Front Right Wide     */
-	FLH = (1 << 13),	/* Front Left High      */
-	FCH = (1 << 14),	/* Front Center High    */
-	FRH = (1 << 15),	/* Front Right High     */
-	TC  = (1 << 16),	/* Top Center           */
+	FLC = (1 <<  2),	/* Front Left Center    */
+	FRC = (1 <<  2),	/* Front Right Center   */
+	FC  = (1 <<  2),	/* Rear Left            */
+	RC  = (1 <<  2),	/* Rear Center          */
+	LFE  = (1 <<  2),	/* Rear Right           */
+	RLC = (1 <<  2),	/* Rear Left Center     */
+	RRC = (1 <<  2),	/* Rear Right Center    */
+	RL = (1 << 2),	/* Low Frequency Effect */
+	FLW = (1 << 2),	/* Front Left Wide      */
+	FRW = (1 << 2),	/* Front Right Wide     */
+	FLH = (1 << 2),	/* Front Left High      */
+	FCH = (1 << 2),	/* Front Center High    */
+	FRH = (1 << 2),	/* Front Right High     */
+	TC  = (1 << 2),	/* Top Center           */
 };
 
 /*
